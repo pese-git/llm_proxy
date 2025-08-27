@@ -1,0 +1,31 @@
+{
+  "name": "GPTunnel Local Proxy",
+  "api_base": "http://localhost:8000/v1",
+  "api_key": "your-gptunnel-api-key-here",
+  "models": [
+    "gpt-4o-mini",
+    "gpt-4o", 
+    "gpt-3.5-turbo",
+    "llama4-maverick",
+    "qwen3-8b",
+    "deepseek-3.1",
+    "mistral-small"
+  ],
+  "default_model": "gpt-4o-mini",
+  "context_window": 128000,
+  "supports_vision": false,
+  "supports_tools": false,
+  "supports_streaming": true,
+  "description": "Локальный прокси для GPTunnel API с поддержкой множества моделей",
+  "capabilities": {
+    "chat": true,
+    "completions": true,
+    "embeddings": false,
+    "vision": false,
+    "audio": false
+  },
+  "rate_limit": {
+    "requests_per_minute": 60,
+    "tokens_per_minute": 60000
+  }
+}
