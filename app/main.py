@@ -2,8 +2,9 @@ from fastapi import FastAPI, HTTPException, Header, Request, Response
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Any
-import time
 import logging
+import json  # <-- Добавьте этот импорт
+import time  # <-- И этот тоже
 from app.models import (
     ChatCompletionRequest, 
     ChatCompletionResponse,
@@ -13,7 +14,11 @@ from app.services.gptunnel import GPTunnelService
 from app.config import get_settings
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
 logger = logging.getLogger(__name__)
 
 # Инициализация приложения
@@ -61,7 +66,6 @@ async def list_models():
     Получает и проксирует список доступных моделей из GPTunnel
     """
     try:
-        import time
         current_time = time.time()
         
         # Проверяем кэш (обновляем каждые 5 минут)
@@ -116,40 +120,57 @@ async def create_chat_completion(
     Проксирует запросы к GPTunnel API для создания chat completion
     """
     try:
-        logger.info(f" Проксирует запросы к GPTunnel API для создания chat completion")
         body = await request.json()
+        logger.info(f"Received request body: {json.dumps(body, ensure_ascii=False)[:500]}...")
+        
         chat_request = ChatCompletionRequest(**body)
         
         # Проверяем, что модель доступна
         models = await list_models()
-        #logger.info(f"  Существующие модели {models}")
         model_ids = [m.id for m in models.data]
         
         if chat_request.model not in model_ids:
             logger.warning(f"Model {chat_request.model} not in available models: {model_ids}")
-            # Можно либо выбросить ошибку, либо использовать модель по умолчанию
-            # raise HTTPException(status_code=400, detail=f"Model {chat_request.model} not available")
         
         logger.info(f"Processing request for model: {chat_request.model}")
         logger.info(f"Stream mode: {chat_request.stream}")
+        logger.info(f"Messages count: {len(chat_request.messages)}")
         
         # Проверка на streaming
         if chat_request.stream:
-            async def generate():
-                async for chunk in gptunnel_service.create_chat_completion_stream(chat_request):
-                    yield chunk
+            logger.info("Starting streaming response...")
+            
+            async def stream_generator():
+                try:
+                    logger.info("Stream generator started")
+                    chunk_count = 0
+                    
+                    async for chunk in gptunnel_service.create_chat_completion_stream(chat_request):
+                        chunk_count += 1
+                        logger.debug(f"Sending chunk {chunk_count}: {chunk[:100] if len(chunk) > 100 else chunk}")
+                        yield chunk
+                        
+                    logger.info(f"Stream generator completed. Total chunks sent: {chunk_count}")
+                    
+                except Exception as e:
+                    logger.error(f"Error in stream generator: {e}", exc_info=True)
+                    error_data = json.dumps({"error": {"message": str(e), "type": "stream_error"}})
+                    yield f"data: {error_data}\n\n".encode('utf-8')
+                    yield b"data: [DONE]\n\n"
             
             return StreamingResponse(
-                generate(),
+                stream_generator(),
                 media_type="text/event-stream",
                 headers={
-                    "Cache-Control": "no-cache",
+                    "Cache-Control": "no-cache, no-transform",
                     "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no"  # Для nginx
+                    "X-Accel-Buffering": "no",
+                    "Content-Type": "text/event-stream"
                 }
             )
         
         # Обычный запрос
+        logger.info("Processing non-streaming request...")
         response = await gptunnel_service.create_chat_completion(chat_request)
         
         # Добавляем информацию о стоимости в логи
@@ -158,8 +179,10 @@ async def create_chat_completion(
         
         return response
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error processing request: {str(e)}")
+        logger.error(f"Error processing request: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 # Middleware для логирования запросов

@@ -1,12 +1,9 @@
 import httpx
 import json
+import asyncio
 from typing import Optional, Dict, Any, AsyncGenerator
 from app.config import get_settings
-from app.models import (
-    ChatCompletionRequest, 
-    ChatCompletionResponse,
-    ModelsResponse
-)
+from app.models import ChatCompletionRequest, ChatCompletionResponse, ModelsResponse
 import logging
 
 logger = logging.getLogger(__name__)
@@ -21,9 +18,7 @@ class GPTunnelService:
         }
     
     async def get_models(self) -> ModelsResponse:
-        """
-        Получает список доступных моделей из GPTunnel API
-        """
+        """Получает список доступных моделей из GPTunnel API"""
         url = f"{self.base_url}/models"
         
         async with httpx.AsyncClient() as client:
@@ -34,7 +29,6 @@ class GPTunnelService:
                     timeout=30.0
                 )
                 response.raise_for_status()
-                
                 return ModelsResponse(**response.json())
                 
             except httpx.HTTPStatusError as e:
@@ -49,9 +43,7 @@ class GPTunnelService:
         request: ChatCompletionRequest,
         custom_headers: Optional[Dict[str, str]] = None
     ) -> ChatCompletionResponse:
-        """
-        Проксирует запрос к GPTunnel API
-        """
+        """Проксирует запрос к GPTunnel API"""
         url = f"{self.base_url}/chat/completions"
         
         headers = self.headers.copy()
@@ -69,7 +61,6 @@ class GPTunnelService:
                     timeout=60.0
                 )
                 response.raise_for_status()
-                
                 return ChatCompletionResponse(**response.json())
                 
             except httpx.HTTPStatusError as e:
@@ -85,42 +76,78 @@ class GPTunnelService:
         custom_headers: Optional[Dict[str, str]] = None
     ) -> AsyncGenerator[bytes, None]:
         """
-        Проксирует streaming запрос к GPTunnel API
+        Проксирует streaming запрос к GPTunnel API с правильной обработкой SSE
         """
         url = f"{self.base_url}/chat/completions"
         request.stream = True
         
         headers = self.headers.copy()
         headers["Accept"] = "text/event-stream"
+        headers["Cache-Control"] = "no-cache"
         
         if custom_headers:
             for key, value in custom_headers.items():
                 if key.lower() != "authorization":
                     headers[key] = value
         
-        async with httpx.AsyncClient() as client:
+        request_data = request.dict(exclude_none=True)
+        logger.info(f"Sending streaming request to GPTunnel: {url}")
+        logger.debug(f"Request data: {json.dumps(request_data, ensure_ascii=False)}")
+        
+        timeout = httpx.Timeout(timeout=120.0, connect=30.0, read=None)
+        
+        async with httpx.AsyncClient(timeout=timeout) as client:
             try:
                 async with client.stream(
                     "POST",
                     url,
-                    json=request.dict(exclude_none=True),
-                    headers=headers,
-                    timeout=httpx.Timeout(60.0, read=None)
+                    json=request_data,
+                    headers=headers
                 ) as response:
+                    logger.info(f"Stream response status: {response.status_code}")
                     response.raise_for_status()
                     
+                    chunk_count = 0
                     async for line in response.aiter_lines():
                         if line:
+                            chunk_count += 1
+                            logger.debug(f"Received chunk {chunk_count}: {line[:100]}...")
+                            
+                            # GPTunnel уже отправляет в формате SSE
                             if line.startswith("data: "):
                                 yield f"{line}\n\n".encode('utf-8')
+                            elif line == "[DONE]":
+                                yield b"data: [DONE]\n\n"
+                                break
                             else:
+                                # Если строка не в формате SSE, форматируем её
                                 yield f"data: {line}\n\n".encode('utf-8')
                     
-                    yield b"data: [DONE]\n\n"
+                    logger.info(f"Stream completed. Total chunks: {chunk_count}")
+                    
+                    # Убедимся, что отправляем финальное сообщение
+                    if chunk_count > 0:
+                        yield b"data: [DONE]\n\n"
                     
             except httpx.HTTPStatusError as e:
-                error_msg = f"data: {json.dumps({'error': str(e)})}\n\n"
-                yield error_msg.encode('utf-8')
+                logger.error(f"HTTP error in stream: {e}")
+                error_msg = {
+                    "error": {
+                        "message": str(e),
+                        "type": "http_error",
+                        "code": e.response.status_code if hasattr(e, 'response') else 500
+                    }
+                }
+                yield f"data: {json.dumps(error_msg)}\n\n".encode('utf-8')
+                yield b"data: [DONE]\n\n"
+                
             except Exception as e:
-                error_msg = f"data: {json.dumps({'error': str(e)})}\n\n"
-                yield error_msg.encode('utf-8')
+                logger.error(f"Error in stream: {e}", exc_info=True)
+                error_msg = {
+                    "error": {
+                        "message": str(e),
+                        "type": "stream_error"
+                    }
+                }
+                yield f"data: {json.dumps(error_msg)}\n\n".encode('utf-8')
+                yield b"data: [DONE]\n\n"
