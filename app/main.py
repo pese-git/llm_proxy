@@ -147,7 +147,8 @@ async def create_chat_completion(
                     
                     async for chunk in gptunnel_service.create_chat_completion_stream(chat_request):
                         chunk_count += 1
-                        logger.debug(f"Sending chunk {chunk_count}: {chunk[:100] if len(chunk) > 100 else chunk}")
+                        if chunk_count <= 5 or b"[DONE]" in chunk:  # Логируем первые 5 и последний chunk
+                            logger.debug(f"Sending chunk {chunk_count}: {chunk[:200]}")
                         yield chunk
                         
                     logger.info(f"Stream generator completed. Total chunks sent: {chunk_count}")
@@ -164,12 +165,13 @@ async def create_chat_completion(
                 headers={
                     "Cache-Control": "no-cache, no-transform",
                     "Connection": "keep-alive",
+                    "Content-Type": "text/event-stream",
                     "X-Accel-Buffering": "no",
-                    "Content-Type": "text/event-stream"
+                    "Transfer-Encoding": "chunked"
                 }
             )
         
-        # Обычный запрос
+        # Обычный запрос (без streaming)
         logger.info("Processing non-streaming request...")
         response = await gptunnel_service.create_chat_completion(chat_request)
         

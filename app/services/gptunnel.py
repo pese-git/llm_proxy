@@ -46,6 +46,10 @@ class GPTunnelService:
         """Проксирует запрос к GPTunnel API"""
         url = f"{self.base_url}/chat/completions"
         
+        # Убираем stream из запроса для обычного режима
+        request_data = request.dict(exclude_none=True)
+        request_data['stream'] = False
+        
         headers = self.headers.copy()
         if custom_headers:
             for key, value in custom_headers.items():
@@ -56,7 +60,7 @@ class GPTunnelService:
             try:
                 response = await client.post(
                     url,
-                    json=request.dict(exclude_none=True),
+                    json=request_data,
                     headers=headers,
                     timeout=60.0
                 )
@@ -76,78 +80,110 @@ class GPTunnelService:
         custom_headers: Optional[Dict[str, str]] = None
     ) -> AsyncGenerator[bytes, None]:
         """
-        Проксирует streaming запрос к GPTunnel API с правильной обработкой SSE
+        Создает streaming ответ, получая полный ответ от GPTunnel и эмулируя streaming
         """
-        url = f"{self.base_url}/chat/completions"
-        request.stream = True
-        
-        headers = self.headers.copy()
-        headers["Accept"] = "text/event-stream"
-        headers["Cache-Control"] = "no-cache"
-        
-        if custom_headers:
-            for key, value in custom_headers.items():
-                if key.lower() != "authorization":
-                    headers[key] = value
-        
-        request_data = request.dict(exclude_none=True)
-        logger.info(f"Sending streaming request to GPTunnel: {url}")
-        logger.debug(f"Request data: {json.dumps(request_data, ensure_ascii=False)}")
-        
-        timeout = httpx.Timeout(timeout=120.0, connect=30.0, read=None)
-        
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            try:
-                async with client.stream(
-                    "POST",
+        try:
+            # Получаем полный ответ от GPTunnel (так как их API не поддерживает настоящий streaming)
+            logger.info("Getting full response from GPTunnel to simulate streaming...")
+            
+            # Делаем обычный запрос
+            url = f"{self.base_url}/chat/completions"
+            request_data = request.dict(exclude_none=True)
+            request_data['stream'] = False  # GPTunnel не поддерживает настоящий streaming
+            
+            headers = self.headers.copy()
+            if custom_headers:
+                for key, value in custom_headers.items():
+                    if key.lower() != "authorization":
+                        headers[key] = value
+            
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
                     url,
                     json=request_data,
                     headers=headers
-                ) as response:
-                    logger.info(f"Stream response status: {response.status_code}")
-                    response.raise_for_status()
-                    
-                    chunk_count = 0
-                    async for line in response.aiter_lines():
-                        if line:
-                            chunk_count += 1
-                            logger.debug(f"Received chunk {chunk_count}: {line[:100]}...")
-                            
-                            # GPTunnel уже отправляет в формате SSE
-                            if line.startswith("data: "):
-                                yield f"{line}\n\n".encode('utf-8')
-                            elif line == "[DONE]":
-                                yield b"data: [DONE]\n\n"
-                                break
-                            else:
-                                # Если строка не в формате SSE, форматируем её
-                                yield f"data: {line}\n\n".encode('utf-8')
-                    
-                    logger.info(f"Stream completed. Total chunks: {chunk_count}")
-                    
-                    # Убедимся, что отправляем финальное сообщение
-                    if chunk_count > 0:
-                        yield b"data: [DONE]\n\n"
-                    
-            except httpx.HTTPStatusError as e:
-                logger.error(f"HTTP error in stream: {e}")
-                error_msg = {
-                    "error": {
-                        "message": str(e),
-                        "type": "http_error",
-                        "code": e.response.status_code if hasattr(e, 'response') else 500
-                    }
-                }
-                yield f"data: {json.dumps(error_msg)}\n\n".encode('utf-8')
+                )
+                response.raise_for_status()
+                full_response = response.json()
+            
+            logger.info(f"Got response from GPTunnel: {json.dumps(full_response, ensure_ascii=False)[:500]}...")
+            
+            # Проверяем наличие контента
+            if not full_response.get("choices") or not full_response["choices"][0].get("message"):
+                logger.error("No content in response")
+                yield f"data: {json.dumps({'error': 'No content in response'})}\n\n".encode('utf-8')
                 yield b"data: [DONE]\n\n"
+                return
+            
+            content = full_response["choices"][0]["message"]["content"]
+            model = full_response.get("model", request.model)
+            response_id = full_response.get("id", "chatcmpl-proxy")
+            created = full_response.get("created", 1234567890)
+            
+            logger.info(f"Streaming content length: {len(content)} characters")
+            
+            # Эмулируем streaming, отправляя текст частями
+            # Разбиваем по словам для более естественного streaming
+            words = content.split(' ')
+            chunk_size = 3  # Отправляем по 3 слова за раз
+            
+            for i in range(0, len(words), chunk_size):
+                chunk_words = words[i:min(i + chunk_size, len(words))]
+                chunk_text = ' '.join(chunk_words)
                 
-            except Exception as e:
-                logger.error(f"Error in stream: {e}", exc_info=True)
-                error_msg = {
-                    "error": {
-                        "message": str(e),
-                        "type": "stream_error"
-                    }
+                # Добавляем пробел после каждого чанка, кроме последнего
+                if i + chunk_size < len(words):
+                    chunk_text += ' '
+                
+                # Формируем chunk в формате OpenAI streaming
+                chunk_data = {
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "content": chunk_text
+                            },
+                            "finish_reason": None
+                        }
+                    ]
                 }
-                yield f"data: {json.dumps(error_msg)}\n\n".encode('utf-8')
-                yield b"data: [DONE]\n\n"
+                
+                yield f"data: {json.dumps(chunk_data)}\n\n".encode('utf-8')
+                await asyncio.sleep(0.01)  # Небольшая задержка для эмуляции streaming
+            
+            # Отправляем финальный chunk с finish_reason
+            final_chunk = {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }
+                ]
+            }
+            
+            yield f"data: {json.dumps(final_chunk)}\n\n".encode('utf-8')
+            
+            # Отправляем [DONE]
+            yield b"data: [DONE]\n\n"
+            
+            logger.info("Streaming completed successfully")
+            
+        except Exception as e:
+            logger.error(f"Error in streaming: {e}", exc_info=True)
+            error_chunk = {
+                "error": {
+                    "message": str(e),
+                    "type": "stream_error"
+                }
+            }
+            yield f"data: {json.dumps(error_chunk)}\n\n".encode('utf-8')
+            yield b"data: [DONE]\n\n"
