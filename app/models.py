@@ -6,6 +6,9 @@ class MessageRole(str, Enum):
     system = "system"
     user = "user"
     assistant = "assistant"
+    developer = "developer"  # Поддержка роли developer от Void IDE
+    tool = "tool"  # Поддержка роли tool от Void IDE
+    function = "function"  # Поддержка роли function (для обратной совместимости)
 
 class Message(BaseModel):
     role: MessageRole
