@@ -1,11 +1,5 @@
 import uvicorn
-import logging
-from app.config import get_settings
-
-from app.logging_config import setup_logging
-
-# В начале файла
-setup_logging(logging.DEBUG)  # Для отладки используйте DEBUG
+from app.core.config import get_settings
 
 if __name__ == "__main__":
     settings = get_settings()
