@@ -8,7 +8,7 @@ class MessageRole(str, Enum):
     assistant = "assistant"
     developer = "developer"  # Поддержка роли developer от Void IDE
     tool = "tool"  # Поддержка роли tool от Void IDE
-    function = "function"  # Поддержка роли function (для обратной совместимости)
+    function = "function"  # Поддержка роли function
 
 class Message(BaseModel):
     role: MessageRole
@@ -47,18 +47,3 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: List[Choice]
     usage: Usage
-
-
-
-class ModelInfo(BaseModel):
-    id: str
-    object: str
-    created: int
-    title: str
-    max_capacity: int
-    cost_context: str
-    cost_completion: str
-
-class ModelsResponse(BaseModel):
-    object: str
-    data: List[ModelInfo]

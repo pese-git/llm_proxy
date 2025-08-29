@@ -2,8 +2,9 @@ import httpx
 import json
 import asyncio
 from typing import Optional, Dict, Any, AsyncGenerator
-from app.config import get_settings
-from app.models import ChatCompletionRequest, ChatCompletionResponse, ModelsResponse
+from app.core.config import get_settings
+from app.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
+from app.schemas.model import ModelsResponse
 import logging
 
 logger = logging.getLogger(__name__)
